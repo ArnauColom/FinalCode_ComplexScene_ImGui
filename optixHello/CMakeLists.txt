@@ -26,13 +26,21 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/kernels.cu
+#set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/kernels_k_means_space.cu
+
+ # PROPERTIES CUDA_SOURCE_PROPERTY_FORMAT OBJ
+ # )
+
+ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/kernels_k_means_VPL.cu   
+  kernels_k_means_space.cu
+
   PROPERTIES CUDA_SOURCE_PROPERTY_FORMAT OBJ
   )
 
 
 OPTIX_add_sample_executable( optixHello target_name
-  kernels.cu
+  kernels_k_means_space.cu
+  kernels_k_means_VPL.cu
   draw_solid_color.cu
   geometry.cu
   camera.cu
@@ -42,7 +50,6 @@ OPTIX_add_sample_executable( optixHello target_name
   cluster.cu
   Model.h
   Model.cpp  
-  kernels.h
 
   )
   set_property(TARGET ${target_name} PROPERTY CUDA_SEPARABLE_COMPILATION ON)

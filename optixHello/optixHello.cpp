@@ -65,7 +65,7 @@
 
 
 
-
+float auuuux = 0;
 
 //------------------------------------------------------------------------------
 //
@@ -75,6 +75,7 @@
 
 bool             resize_dirty = false;
 bool			 use_mouse_optix = true;
+//bool			 COMPUTE_ALL_BOOL = false;
 
 // Camera state
 bool              camera_changed = true;
@@ -87,13 +88,27 @@ int32_t           mouse_button = -1;
 //Max Trace
 const int         max_trace = 10;
 
-// Show_Light
-
+// Show Light
 bool			  show_indirect = false;
 bool			  show_direct = true;
+// Show VPL and clustering
 bool			  show_vpl = false;
 bool			  show_k_means = false;
+//Apply clustering
 bool			  apply_k_means = false;
+
+//Compute R matrix
+bool			  bool_compute_R_matrix = false;
+bool			  show_R_matrix = false;
+
+//Bool VPl clustering
+bool			  apply_k_means_VPL = false;
+
+
+
+//Apply Optix or CUDA kernels
+bool			  use_cuda_Kernels = false;
+static const char* 			  current_compilation = "Use OptiX";
 
 //Smothstep Params
 float			  SSmin = 0.f;
@@ -226,7 +241,8 @@ extern "C" void assing_cluster_CUDA(
 	float3*    centroids_n,
 	float3*    points,
 	float3*    normals,
-	int*       assing_vector);
+	int*       assing_vector,
+	int number_of_clusters);
 
 extern "C" void recompute_centroids_CUDA(
 	cudaStream_t stream,
@@ -236,7 +252,17 @@ extern "C" void recompute_centroids_CUDA(
 	float3*    centroids_n,
 	float3*    points,
 	float3*    normals,
-	int*       assing_vector);
+	int*       assing_vector,
+	int number_of_clusters);
+
+extern "C"  void assing_cluster_VPL_CUDA(
+	cudaStream_t stream,
+	int max_vpl,
+	int vpl_clusters,
+	int space_clusters,
+	int F_VPL_Cluster[K_MEANS_VPL],
+	float3* R_matrix,
+	int* final_array);
 
 //---LIGHTS
 
@@ -299,9 +325,10 @@ static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 	else if (mouse_button == GLFW_MOUSE_BUTTON_RIGHT)
 	{
 		trackball.setViewMode(sutil::Trackball::EyeFixed);
-		trackball.updateTracking(static_cast<int>(xpos), static_cast<int>(ypos), params->width, params->height);
+		trackball.updateTracking(static_cast<int>(xpos+1), static_cast<int>(ypos), params->width, params->height);
 		camera_changed = true;
 	}
+
 }
 
 
@@ -314,7 +341,52 @@ static void windowSizeCallback(GLFWwindow* window, int32_t res_x, int32_t res_y)
 	resize_dirty = true;
 }
 
-static void ImGuiConf() {
+void createClusterColors(WhittedState& state) {
+
+	for (int i = 0; i < state.params.N_spatial_cluster; i++) {
+		float mod_x = rand() % 1000;
+		float num_x = mod_x / 1000;
+
+		float mod_y = rand() % 1000;
+		float num_y = mod_y / 1000;
+
+		float mod_z = rand() % 1000;
+		float num_z = mod_z / 1000;
+
+		state.params.cluster_color[i] = make_float3(num_x, num_y, num_z);
+
+	}
+}
+
+void create_centroid(Params& params) {
+	for (int i = 0; i < K_POINTS_CLUSTER; i++) {
+		int rn_x = rand() % params.width;
+		int rn_y = rand() % params.height;
+
+		int centroid_indx = params.width*rn_y + rn_x;
+
+
+		params.pos_clust_x[i] = rn_x;
+		params.pos_clust_y[i] = rn_y;
+
+		params.position_cluster[i] = centroid_indx;
+	}
+}
+void create_VPL_init_cluster(WhittedState& state) {
+	for (int i = 0; i < K_MEANS_VPL; i++) {
+		int total_VPL = state.params.num_vpl *(state.params.max_bounces + 1);
+		int rn = rand() % total_VPL;
+		state.params.first_VPL_cluster[i] = rn;
+	}
+
+	//Store in a pointer to be used in cuda kernel
+	CUDA_CHECK(cudaMalloc((void**)&state.params.first_VPL_cluster_d, sizeof(int)*K_MEANS_VPL));
+	CUDA_CHECK(cudaMemcpy((void*)(state.params.first_VPL_cluster_d), &state.params.first_VPL_cluster,
+		sizeof(int)*K_MEANS_VPL, cudaMemcpyHostToDevice));
+
+}
+
+static void ImGuiConf(WhittedState& state) {
 
 
 	ImGui_ImplOpenGL3_NewFrame();
@@ -360,7 +432,19 @@ static void ImGuiConf() {
 		}
 	}
 	//Apply Technique or not
-	if (ImGui::Button("Apply Optimization")) {
+	if (ImGui::Button("Apply All techique")) {
+
+		if (state.params.COMPUTE_ALL_BOOL) {
+			state.params.COMPUTE_ALL_BOOL = false;
+			camera_changed = true;
+		}
+		else {
+			state.params.COMPUTE_ALL_BOOL = true;
+			camera_changed = true;
+		}
+	}
+	//Apply Technique or not
+	if (ImGui::Button("Apply Space Clustering")) {
 
 		if (apply_k_means) {
 			apply_k_means = false;
@@ -371,8 +455,33 @@ static void ImGuiConf() {
 			camera_changed = true;
 		}
 	}
+	if (apply_k_means) {
+		if (ImGui::Button("Compute R Matrix")) {
 
+			if (bool_compute_R_matrix) {
+				bool_compute_R_matrix = false;
+				camera_changed = true;
+			}
+			else {
+				bool_compute_R_matrix = true;
+				camera_changed = true;
+			}
+		}
+	}
 
+	if (bool_compute_R_matrix) {
+		if (ImGui::Button("Cluster VPL")) {
+
+			if (apply_k_means_VPL) {
+				apply_k_means_VPL = false;
+			
+			}
+			else {
+				apply_k_means_VPL = true;
+			
+			}
+		}
+	}
 
 	const char* items_cluster[] = { "Use K-means", "Use QT-clustring" };
 	static const char* current_item_cluster = "Use K-means";
@@ -389,19 +498,33 @@ static void ImGuiConf() {
 		ImGui::EndCombo();
 	}
 
-	const char* items[] = { "Use OptiX", "Use CUDA Kernels"};
-	static const char* current_item = "Use OptiX";
-	if (ImGui::BeginCombo("Select compilation Option", current_item)) // The second parameter is the label previewed before opening the combo.
-	{
-		for (int n = 0; n < IM_ARRAYSIZE(items); n++)
-		{
-			bool is_selected = (current_item == items[n]); // You can store your selection however you want, outside or inside your objects
-			if (ImGui::Selectable(items[n], is_selected))
-				current_item = items[n];
-			if (is_selected)
-				ImGui::SetItemDefaultFocus();   // You may set the initial focus when opening the combo (scrolling + for keyboard navigation support)
+	//const char* items[] = {"Use OptiX", "Use CUDA Kernels"};
+	//if (ImGui::BeginCombo("Select compilation Option", current_compilation)) // The second parameter is the label previewed before opening the combo.
+	//{
+	//	for (int n = 0; n < IM_ARRAYSIZE(items); n++)
+	//	{
+	//		bool is_selected = (current_compilation == items[n]); // You can store your selection however you want, outside or inside your objects
+	//		if (ImGui::Selectable(items[n], is_selected))
+	//			current_compilation = items[n];
+	//		if (is_selected)
+	//			ImGui::SetItemDefaultFocus();   // You may set the initial focus when opening the combo (scrolling + for keyboard navigation support)
+	//	}
+	//	ImGui::EndCombo();
+	//}
+
+	//if (current_compilation == "Use OptiX")
+	//	use_cuda_Kernels = false;
+	//else
+	//	use_cuda_Kernels = true;
+
+	if (ImGui::Button("Use OptiX or Use CUDA Kernels")) {
+		if (use_cuda_Kernels) {
+			use_cuda_Kernels = false;
 		}
-		ImGui::EndCombo();
+		else {
+			use_cuda_Kernels = true;
+
+		}
 	}
 
 	//Visualiza Clusteriazation of the Space
@@ -414,6 +537,83 @@ static void ImGuiConf() {
 			show_k_means = true;
 			camera_changed = true;
 		}
+	}	
+	if (ImGui::Button("Show R MAtrix")) {
+		if (show_R_matrix) {
+			show_R_matrix = false;
+			state.params.show_R_matrix = false;
+			camera_changed = true;
+
+		}
+		else {
+			show_R_matrix = true;
+			state.params.show_R_matrix = true;
+			camera_changed = true;
+
+		}
+	}
+
+	if (ImGui::InputInt("Change number of cluster space K-Means Clustering", &state.params.N_spatial_cluster)) {
+		// Realloc accumulation buffer
+	
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.pos_cent)));
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.normal_cent)));
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.selected_points_pos)));
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.selected_points_norm)));
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.selected_point_index_x)));
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.selected_point_index_y)));
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.R_matrix)));
+
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.pos_cent),
+			state.params.N_spatial_cluster * sizeof(float3) //Memory for all position centroid
+		));
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.normal_cent),
+			state.params.N_spatial_cluster * sizeof(float3) //Memory for all normals centroid 
+		));
+		//Points Selected per each cluster
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.selected_points_pos),
+			state.params.N_spatial_cluster * sizeof(float3) //Memory to store position of selected position
+		));
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.selected_points_norm),
+			state.params.N_spatial_cluster * sizeof(float3) //Memory to store position of selected position
+		));
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.selected_point_index_x),
+			state.params.N_spatial_cluster * sizeof(int) //Memory for all normals centroid 
+		));
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.selected_point_index_y),
+			state.params.N_spatial_cluster * sizeof(int) //Memory for all normals centroid 
+		));
+		int total_VPL = state.params.num_vpl *(state.params.max_bounces + 1);
+
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.R_matrix),
+			total_VPL * state.params.N_spatial_cluster * sizeof(float3) //Save respective cluster
+		)); //Memory to store the R matrix. VPLSxSPACE_CLUSTER memory.
+
+		create_centroid(state.params);
+		state.params.subframe_index = 0;
+
+	}
+
+	if (ImGui::InputInt("Change number of cluster VPL K-Means Clustering", &state.params.N_VPL_cluster)) {
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.VPL_initial_cent)));
+		CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.VPL_cent)));
+
+		
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.VPL_initial_cent),
+			state.params.N_VPL_cluster * sizeof(VPL) //Save respective cluster
+		));//Save initial VPL centroids
+		CUDA_CHECK(cudaMalloc(
+			reinterpret_cast<void**>(&state.params.VPL_cent),
+			state.params.N_VPL_cluster * sizeof(VPL) //Save respective cluster
+		));//Save initial VPL centroids
 	}
 
 	ImGui::End();
@@ -443,106 +643,6 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
 		{
 			glfwSetWindowShouldClose(window, true);
 		}
-
-	}
-	else if (key == GLFW_KEY_D) //Show direct illumination
-	{
-		if (show_direct) {
-			show_direct = false;
-			camera_changed = true;
-
-
-		}
-		else {
-			show_direct = true;
-			camera_changed = true;
-
-		}
-
-	}
-	else if (key == GLFW_KEY_I)//Show indirect illumination by VPL
-	{
-		if (show_indirect) {
-			show_indirect = false;
-			camera_changed = true;
-
-
-		}
-		else {
-			show_indirect = true;
-			camera_changed = true;
-
-		}
-
-	}
-	else if (key == GLFW_KEY_V) //View VPL position
-	{
-		if (show_vpl) {
-			show_vpl = false;
-			camera_changed = true;
-
-
-		}
-		else {
-			show_vpl = true;
-			camera_changed = true;
-
-		}
-	}else if (key == GLFW_KEY_L) //View VPL position
-	{
-		if (show_k_means) {
-			show_k_means = false;
-			camera_changed = true;
-
-
-		}
-		else {
-			show_k_means = true;
-			camera_changed = true;
-
-		}
-	}else if (key == GLFW_KEY_K) //View VPL position
-	{
-		if (apply_k_means) {
-			apply_k_means = false;
-			camera_changed = true;
-
-
-		}
-		else {
-			apply_k_means = true;
-			camera_changed = true;
-
-		}
-	}
-
-
-	else if (key == GLFW_KEY_O) //SSmin
-	{
-
-		SSmin = SSmin - 1;
-		camera_changed = true;
-
-	}
-	else if (key == GLFW_KEY_P)
-	{
-
-		SSmin = SSmin + 1;
-		camera_changed = true;
-
-	}
-	else if (key == GLFW_KEY_N)// SSmax
-	{
-
-		SSmax = SSmax - 0.1;
-		camera_changed = true;
-
-	}
-	else if (key == GLFW_KEY_M)
-	{
-
-		SSmax = SSmax + 0.1;
-		camera_changed = true;
 
 	}
 
@@ -575,10 +675,9 @@ void printUsageAndExit(const char* argv0)
 void initLaunchParams(WhittedState& state)
 {
 
-	state.params.num_vpl = 15; //Number of VPL per light
-	state.params.max_bounces = 2; //Number of bounces per vpl
-	state.params.number_of_lights = 3; //Number of light
 
+
+	//Image--------------------------------------------------------------------
 	CUDA_CHECK(cudaMalloc(
 		reinterpret_cast<void**>(&state.params.accum_buffer),
 		state.params.width*state.params.height * sizeof(float4)
@@ -589,7 +688,7 @@ void initLaunchParams(WhittedState& state)
 		state.params.num_vpl *(state.params.max_bounces + 1) * sizeof(VPL) //Memory for VPL
 	)); //Save space for the vpl
 
-
+	//POint INFORMATION--------------------------------------------------------------------
 	CUDA_CHECK(cudaMalloc(
 		reinterpret_cast<void**>(&state.params.pos),
 		state.params.width*state.params.height * sizeof(float3) //Memory for all points
@@ -598,20 +697,90 @@ void initLaunchParams(WhittedState& state)
 		reinterpret_cast<void**>(&state.params.normal),
 		state.params.width*state.params.height * sizeof(float3) //Memory for all normals
 	));
-
+	//Matrix assingn each point to its cluster--------------------------------------------------------------------
 	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&state.params.assing_cluster_vector),
 		state.params.width*state.params.height * sizeof(int) //Save respective cluster per pixel
 	));
-
+	//Point Centroids--------------------------------------------------------------------
 	CUDA_CHECK(cudaMalloc(
 		reinterpret_cast<void**>(&state.params.pos_cent),
-		K_POINTS_CLUSTER * sizeof(float3) //Memory for all position centroid
+		state.params.N_spatial_cluster * sizeof(float3) //Memory for all position centroid
 	));
 	CUDA_CHECK(cudaMalloc(
 		reinterpret_cast<void**>(&state.params.normal_cent),
-		K_POINTS_CLUSTER * sizeof(float3) //Memory for all normals centroid 
+		state.params.N_spatial_cluster * sizeof(float3) //Memory for all normals centroid 
+	));
+	//Points Selected per each cluster
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.selected_points_pos),
+		state.params.N_spatial_cluster * sizeof(float3) //Memory to store position of selected position
+	));
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.selected_points_norm),
+		state.params.N_spatial_cluster * sizeof(float3) //Memory to store position of selected position
+	));
+	//K_slected points--------------------------------------------------------------------
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.selected_point_index_x),
+		state.params.N_spatial_cluster * sizeof(int) //Memory to store position of selected position
+	));
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.selected_point_index_y),
+		state.params.N_spatial_cluster * sizeof(int) //Memory to store position of selected position
 	));
 
+	//R Matrix--------------------------------------------------------------------
+	int total_VPL = state.params.num_vpl *(state.params.max_bounces + 1);
+
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.R_matrix),
+		total_VPL * state.params.N_spatial_cluster * sizeof(float3) //Save respective cluster
+	)); //Memory to store the R matrix. VPLSxSPACE_CLUSTER memory.
+
+	//VPL CLUSTERING --------------------------------------------------------------------
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.VPL_assing_cluster),
+		total_VPL * sizeof(int) //Save respective cluster
+	));
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.VPL_initial_cent),
+		state.params.N_VPL_cluster * sizeof(VPL) //Save respective cluster
+	));//Save initial VPL centroids
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.VPL_cent),
+		state.params.N_VPL_cluster * sizeof(VPL) //Save respective cluster
+	));//Save initial VPL centroids
+
+		//Local Clusterin select closest cluster
+		//local clustering
+
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.distances_slides),
+		K_POINTS_CLUSTER * K_POINTS_CLUSTER * sizeof(float) //Save respective cluster
+	));
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.L_closest_clusters),
+		K_POINTS_CLUSTER * L_NEAR_CLUSTERS * sizeof(int) //Save respective cluster
+	));
+
+	//Local Clustering Slice
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.L_i_modules),
+		K_POINTS_CLUSTER * state.params.num_vpl *(state.params.max_bounces + 1) * sizeof(float) //Save respective cluster
+	));
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.distances_clusters),
+		K_POINTS_CLUSTER * K_MEANS_VPL * sizeof(float) //Save respective cluster  distances_clusters
+	));
+
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.closest_VPL),
+		K_POINTS_CLUSTER * MAX_VPL_CLUSTERS * sizeof(int) //Save respective cluster  distances_clusters
+	));
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&state.params.selected_VPL_pos),
+		K_POINTS_CLUSTER * MAX_VPL_CLUSTERS * sizeof(int) //Save respective cluster  distances_clusters
+	));
 
 
 	state.params.frame_buffer = nullptr; // Will be set when output buffer is mapped
@@ -1038,6 +1207,25 @@ static void createHitProgram(WhittedState &state) {
 		&pgOptions_info,
 		log, &sizeof_log,
 		&state.hitgroupPGs[RAY_TYPE_INFO]
+	));	
+	
+	//-------------------------------
+	//Select infomation rays
+	//-------------------------------
+	OptixProgramGroupOptions pgOptions_R = {};
+	OptixProgramGroupDesc    pgDesc_R = {};
+	pgDesc_R.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+	pgDesc_R.hitgroup.moduleCH = state.shading_module;
+	pgDesc_R.hitgroup.entryFunctionNameCH = "__closesthit__compute_R_matrix";
+	pgDesc_R.hitgroup.moduleAH = nullptr;
+	pgDesc_R.hitgroup.entryFunctionNameAH = nullptr;
+
+	OPTIX_CHECK(optixProgramGroupCreate(state.context,
+		&pgDesc_R,
+		1,
+		&pgOptions_R,
+		log, &sizeof_log,
+		&state.hitgroupPGs[RAY_TYPE_R]
 	));
 }
 
@@ -1089,6 +1277,18 @@ static void createMissProgram(WhittedState &state)
 		log,
 		&sizeof_log,
 		&state.missPGs[RAY_TYPE_INFO]));
+	miss_prog_group_desc.miss = {
+	nullptr,    // module
+	nullptr     // entryFunctionName
+	};
+	OPTIX_CHECK_LOG(optixProgramGroupCreate(
+		state.context,
+		&miss_prog_group_desc,
+		1,
+		&miss_prog_group_options,
+		log,
+		&sizeof_log,
+		&state.missPGs[RAY_TYPE_R]));
 
 }
 
@@ -1105,9 +1305,11 @@ void createPipeline(WhittedState &state)
 		state.hitgroupPGs[0],
 		state.hitgroupPGs[1],
 		state.hitgroupPGs[2],
+		state.hitgroupPGs[3],
 		state.missPGs[0],
 		state.missPGs[1],	
-		state.missPGs[2]	
+		state.missPGs[2],	
+		state.missPGs[3]	
 	};
 
 	OptixPipelineLinkOptions pipeline_link_options = {};
@@ -1468,6 +1670,17 @@ void createSBT(WhittedState &state)
 
 				hitgroupRecords.push_back(rec_inf);
 			}
+			{
+				const int sbt_idx_3 = meshID * RAY_TYPE_COUNT + 3;  // SBT for occlusion ray-type for ith material
+
+				HitGroupRecord rec_R;
+				OPTIX_CHECK(optixSbtRecordPackHeader(state.hitgroupPGs[RAY_TYPE_R], &rec_R));
+				rec_R.data.diffuse_color = make_float3(mesh->diffuse.x, mesh->diffuse.y, mesh->diffuse.z);
+				rec_R.data.vertices = reinterpret_cast<float3*>(state.vertexBuffer[meshID]);
+				rec_R.data.indices = reinterpret_cast<vec3i*>(state.indexBuffer[meshID]);
+
+				hitgroupRecords.push_back(rec_R);
+			}
 	}
 
 	CUDA_CHECK(cudaMemcpy(
@@ -1514,8 +1727,12 @@ void initCameraState()
 {
 	float3 center = make_float3(model->bounds.center().x, model->bounds.center().y, model->bounds.center().z);
 
-	camera.setEye(center);
-	camera.setLookat(make_float3(center.x + 2, center.y, center.z));
+	//camera.setEye(center);
+	//camera.setLookat(make_float3(center.x + 2, center.y, center.z));	
+
+	camera.setEye(make_float3(-0.655,0.42498,-0.6136));
+	camera.setLookat(make_float3(1.59,0.4482,0.81661));
+
 	camera.setUp(make_float3(0.0f, 1.0f, 0.0f));
 	camera.setFovY(35.0f);
 	camera_changed = true;
@@ -1548,33 +1765,40 @@ void handleResize(sutil::CUDAOutputBuffer<uchar4>& output_buffer, Params& params
 
 	output_buffer.resize(params.width, params.height);
 
-
+	
 	// Realloc accumulation buffer
 	CUDA_CHECK(cudaFree(reinterpret_cast<void*>(params.accum_buffer)));
 	CUDA_CHECK(cudaMalloc(
 		reinterpret_cast<void**>(&params.accum_buffer),
 		params.width*params.height * sizeof(float4)
 	));
+
+
+
+	//POint INFORMATION--------------------------------------------------------------------
+	CUDA_CHECK(cudaFree(reinterpret_cast<void*>(params.pos)));
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&params.pos),
+		params.width*params.height * sizeof(float3) //Memory for all points
+	));
+	CUDA_CHECK(cudaFree(reinterpret_cast<void*>(params.normal)));
+	CUDA_CHECK(cudaMalloc(
+		reinterpret_cast<void**>(&params.normal),
+		params.width*params.height * sizeof(float3) //Memory for all normals
+	));
+	//Matrix assingn each point to its cluster--------------------------------------------------------------------
+	CUDA_CHECK(cudaFree(reinterpret_cast<void*>(params.assing_cluster_vector)));
+
+	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&params.assing_cluster_vector),
+		params.width*params.height * sizeof(int) //Save respective cluster per pixel
+	));
+
+	create_centroid(params);
+	params.subframe_index = 0;
+
+
 }
-void create_centroid(WhittedState& state) {
 
-	for (int i = 0; i < 2000; i++) {
-
-
-		int rn_x = rand() % state.params.width;
-		int rn_y = rand() % state.params.height;
-
-		int centroid_indx = state.params.width*rn_y + rn_x;
-
-		
-		state.params.pos_clust_x[i] = rn_x;
-		state.params.pos_clust_y[i] = rn_y;
-
-		state.params.position_cluster[i] = centroid_indx;
-	}
-
-	
-}
 void updateState(sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedState &state)
 {
 	// Update params on device
@@ -1616,7 +1840,7 @@ void create_points_centroids(WhittedState& state) {
 		reinterpret_cast<CUdeviceptr>(state.d_params),
 		sizeof(Params),
 		&state.sbt,
-		K_POINTS_CLUSTER,  // launch width
+		state.params.N_spatial_cluster,  // launch width
 		1, // launch height
 		1                    // launch depth
 	));
@@ -1628,78 +1852,94 @@ void create_points_centroids(WhittedState& state) {
 void assing_cluster(WhittedState& state) {
 
 
-	//state.params.assing_cluster= true;
-	//CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
-	//	&state.params,
-	//	sizeof(Params),
-	//	cudaMemcpyHostToDevice,
-	//	state.stream
-	//));
 
-	////Launch one ray per pixel
-	//OPTIX_CHECK(optixLaunch(
-	//	state.pipeline,
-	//	state.stream,
-	//	reinterpret_cast<CUdeviceptr>(state.d_params),
-	//	sizeof(Params),
-	//	&state.sbt,
-	//	state.params.width,  // launch width
-	//	state.params.height, // launch height
-	//	1                    // launch depth
-	//));
-	//CUDA_SYNC_CHECK();
-	//state.params.assing_cluster = false;
 
-	int32_t width = state.params.width;
-	int32_t height = state.params.height;
+	if (use_cuda_Kernels) {
+		int32_t width = state.params.width;
+		int32_t height = state.params.height;
 
-	assing_cluster_CUDA(
-		state.stream,
-		width,
-		height,
-		state.params.pos_cent,
-		state.params.normal_cent,
-		state.params.pos,
-		state.params.normal,
-		state.params.assing_cluster_vector);
+		assing_cluster_CUDA(
+			state.stream,
+			width,
+			height,
+			state.params.pos_cent,
+			state.params.normal_cent,
+			state.params.pos,
+			state.params.normal,
+			state.params.assing_cluster_vector,
+			state.params.N_spatial_cluster);
+	}
+	else {
+		state.params.assing_cluster= true;
+		CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
+			&state.params,
+			sizeof(Params),
+			cudaMemcpyHostToDevice,
+			state.stream
+		));
+
+		//Launch one ray per pixel
+		OPTIX_CHECK(optixLaunch(
+			state.pipeline,
+			state.stream,
+			reinterpret_cast<CUdeviceptr>(state.d_params),
+			sizeof(Params),
+			&state.sbt,
+			state.params.width,  // launch width
+			state.params.height, // launch height
+			1                    // launch depth
+		));
+		CUDA_SYNC_CHECK();
+		state.params.assing_cluster = false;
+	}
+
+
 
 }
 
 void recomp_centroid(WhittedState& state) {
-	//state.params.recompute_cluster = true;
-	//CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
-	//	&state.params,
-	//	sizeof(Params),
-	//	cudaMemcpyHostToDevice,
-	//	state.stream
-	//));
 
-	////Launch one ray per pixel
-	//OPTIX_CHECK(optixLaunch(
-	//	state.pipeline,
-	//	state.stream,
-	//	reinterpret_cast<CUdeviceptr>(state.d_params),
-	//	sizeof(Params),
-	//	&state.sbt,
-	//	2000,  // launch width
-	//	1,    // launch height
-	//	1                    // launch depth
-	//));
-	//CUDA_SYNC_CHECK();
-	//state.params.recompute_cluster = false;
 
-	int32_t width = state.params.width;
-	int32_t height = state.params.height;
+	if (use_cuda_Kernels) {
+		int32_t width = state.params.width;
+		int32_t height = state.params.height;
 
-	recompute_centroids_CUDA(
-		state.stream,
-		width,
-		height,
-		state.params.pos_cent,
-		state.params.normal_cent,
-		state.params.pos,
-		state.params.normal,
-		state.params.assing_cluster_vector);
+		recompute_centroids_CUDA(
+			state.stream,
+			width,
+			height,
+			state.params.pos_cent,
+			state.params.normal_cent,
+			state.params.pos,
+			state.params.normal,
+			state.params.assing_cluster_vector,
+			state.params.N_spatial_cluster);
+	}
+	else {
+		state.params.recompute_cluster = true;
+		CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
+			&state.params,
+			sizeof(Params),
+			cudaMemcpyHostToDevice,
+			state.stream
+		));
+
+		//Launch one ray per pixel
+		OPTIX_CHECK(optixLaunch(
+			state.pipeline,
+			state.stream,
+			reinterpret_cast<CUdeviceptr>(state.d_params),
+			sizeof(Params),
+			&state.sbt,
+			state.params.N_spatial_cluster,  // launch width
+			1,    // launch height
+			1                    // launch depth
+		));
+		CUDA_SYNC_CHECK();
+		state.params.recompute_cluster = false;
+	}
+
+	
 
 }
 
@@ -1727,11 +1967,11 @@ void k_means_select_points(WhittedState& state) {
 
 	CUDA_SYNC_CHECK();
 	state.params.select_points = false;
-
 }
 
-void k_means_light(WhittedState& state) {
-
+void compute_R_matrix(WhittedState& state) {
+	state.params.compute_R = true;
+	//Columns: VPL---- rows : points
 	CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
 		&state.params,
 		sizeof(Params),
@@ -1746,60 +1986,199 @@ void k_means_light(WhittedState& state) {
 		reinterpret_cast<CUdeviceptr>(state.d_params),
 		sizeof(Params),
 		&state.sbt,
-		2000,  // launch width
+		state.params.N_spatial_cluster,  // launch width
 		1, // launch height
 		1                    // launch depth
 	));
 	CUDA_SYNC_CHECK();
 
-}
-
-void assing_VPL(WhittedState& state) {
-
-
+	state.params.compute_R = false;
 
 }
 
-void k_means(sutil::CUDAOutputBuffer<uchar4>& output_buffer,WhittedState& state) {
+void k_means_light(WhittedState& state) {
 
-	//update_index = update_index + 1;
+	int max_vpl = state.params.num_vpl *(state.params.max_bounces + 1);
+	if (use_cuda_Kernels) {
 
-	//k_means_select_pointa(state);
-
-
-	//ASSIGN CLUSTERS TO POINTS-------------------------vis------------------------------------------
-	if (state.params.subframe_index == 0) {
-		k_means_select_points(state);
-
-		create_points_centroids(state);
+		assing_cluster_VPL_CUDA(
+			state.stream,
+			max_vpl,
+			state.params.N_VPL_cluster,
+			state.params.N_spatial_cluster,
+			state.params.first_VPL_cluster,
+			state.params.R_matrix,
+			state.params.VPL_assing_cluster);
 	}
-	
-	
-	assing_cluster(state);
+	else {
+		state.params.assing_VPL_bool = true;
+		CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
+			&state.params,
+			sizeof(Params),
+			cudaMemcpyHostToDevice,
+			state.stream
+		));
 
-	//assing_cluster(state);
-	state.params.cluster_light_bool = true;
-	recomp_centroid(state);
-	state.params.cluster_light_bool = false;
+		//Launch one ray per pixel
+		OPTIX_CHECK(optixLaunch(
+			state.pipeline,
+			state.stream,
+			reinterpret_cast<CUdeviceptr>(state.d_params),
+			sizeof(Params),
+			&state.sbt,
+			max_vpl,  // launch width
+			1, // launch height
+			1                    // launch depth
+		));
+		CUDA_SYNC_CHECK();
+		state.params.assing_VPL_bool = false;
 
-
+	}
 }
+
+void compute_cluster_distances(WhittedState& state) {
+
+	state.params.local_slice_compute_distances_bool = true;
+	CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
+		&state.params,
+		sizeof(Params),
+		cudaMemcpyHostToDevice,
+		state.stream
+	));
+	//Launch one ray per pixel
+	OPTIX_CHECK(optixLaunch(
+		state.pipeline,
+		state.stream,
+		reinterpret_cast<CUdeviceptr>(state.d_params),
+		sizeof(Params),
+		&state.sbt,
+		K_POINTS_CLUSTER,  // launch width
+		1, // launch height
+		1                    // launch depth
+	));
+	CUDA_SYNC_CHECK();
+	state.params.local_slice_compute_distances_bool = false;
+}
+
+void select_closest_clusters(WhittedState& state) {
+	state.params.select_closest_clusters_bool = true;
+	CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
+		&state.params,
+		sizeof(Params),
+		cudaMemcpyHostToDevice,
+		state.stream
+	));
+	//Launch one ray per pixel
+	OPTIX_CHECK(optixLaunch(
+		state.pipeline,
+		state.stream,
+		reinterpret_cast<CUdeviceptr>(state.d_params),
+		sizeof(Params),
+		&state.sbt,
+		K_POINTS_CLUSTER,  // launch width
+		1, // launch heightstate.params.num_vpl *(state.params.max_bounces + 1)
+		1                    // launch depth
+	));
+	CUDA_SYNC_CHECK();
+	state.params.select_closest_clusters_bool = false;
+}
+
+void compute_L_i_modules(WhittedState& state) {
+	//Columns: VPL---- rows : points
+	state.params.compute__Li_modules_bool = true;
+	CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
+		&state.params,
+		sizeof(Params),
+		cudaMemcpyHostToDevice,
+		state.stream
+	));
+
+	//Launch one ray per pixel
+	OPTIX_CHECK(optixLaunch(
+		state.pipeline,
+		state.stream,
+		reinterpret_cast<CUdeviceptr>(state.d_params),
+		sizeof(Params),
+		&state.sbt,
+		K_POINTS_CLUSTER,  // launch width
+		1, // launch heightstate.params.num_vpl *(state.params.max_bounces + 1)
+		1                    // launch depth
+	));
+	CUDA_SYNC_CHECK();
+
+	state.params.compute__Li_modules_bool = false;
+}
+
+void select_cheap_clusters(WhittedState& state) {
+	state.params.select_cheap_cluster_bool = true;
+	CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(state.d_params),
+		&state.params,
+		sizeof(Params),
+		cudaMemcpyHostToDevice,
+		state.stream
+	));
+
+	//Launch one ray per pixel
+	OPTIX_CHECK(optixLaunch(
+		state.pipeline,
+		state.stream,
+		reinterpret_cast<CUdeviceptr>(state.d_params),
+		sizeof(Params),
+		&state.sbt,
+		K_POINTS_CLUSTER,  // launch width
+		1, // launch heightstate.params.num_vpl *(state.params.max_bounces + 1)
+		1                    // launch depth
+	));
+	CUDA_SYNC_CHECK();
+
+	state.params.select_cheap_cluster_bool = false;
+}
+
+
+
 
 void launchSubframe(sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedState& state)
 {
 
 	// Launch
 
-	if (apply_k_means) {
+	if (apply_k_means && !state.params.COMPUTE_ALL_BOOL) {
 		if (state.params.subframe_index == 0) {
 			k_means_select_points(state);
 			create_points_centroids(state);
 		}
 		assing_cluster(state);
 		recomp_centroid(state);
-	}
-	
 
+		if (bool_compute_R_matrix) {
+			compute_R_matrix(state);	
+			if (apply_k_means_VPL) {
+				k_means_light(state);
+			}
+			
+		}
+	}
+	if (state.params.COMPUTE_ALL_BOOL) {
+		if (state.params.subframe_index == 0) {
+			k_means_select_points(state);
+			create_points_centroids(state);
+		}
+		assing_cluster(state);
+		recomp_centroid(state);
+
+		
+		compute_R_matrix(state);
+			
+		k_means_light(state);
+
+		compute_cluster_distances(state);
+		select_closest_clusters(state);
+
+		compute_L_i_modules(state);
+		select_cheap_clusters(state);
+
+
+	}
 	
 
 	state.params.compute_image = true;
@@ -1859,22 +2238,7 @@ void launchVPL(WhittedState& state) {
 }
 
 
-void createClusterColors(WhittedState& state) {
 
-	for (int i = 0; i < 2000; i++) {
-		float mod_x = rand() % 1000;
-		float num_x = mod_x / 1000;
-
-		float mod_y = rand() % 1000;
-		float num_y = mod_y / 1000;
-
-		float mod_z = rand() % 1000;
-		float num_z = mod_z / 1000;
-
-		state.params.cluster_color[i] = make_float3(num_x, num_y, num_z);	
-
-	}
-}
 
 void displaySubframe(
 	sutil::CUDAOutputBuffer<uchar4>&  output_buffer,
@@ -1933,6 +2297,14 @@ int main(int argc, char* argv[])
 	WhittedState state;
 	state.params.width = 1280;
 	state.params.height = 720;
+	state.params.N_spatial_cluster = 800;
+	state.params.N_VPL_cluster = 20;
+
+
+	state.params.num_vpl = 60; //Number of VPL 
+	state.params.max_bounces = 2; //Number of bounces per vpl
+	state.params.number_of_lights = 3; //Number of light
+
 	sutil::CUDAOutputBufferType output_buffer_type = sutil::CUDAOutputBufferType::GL_INTEROP;
 	//cleanupState(state);
 
@@ -2009,11 +2381,29 @@ int main(int argc, char* argv[])
 		state.params.create_centroids = false;
 		state.params.cluster_light_bool = false;
 		state.params.init_centroid_points = false;
+		state.params.show_R_matrix = false;
+		state.params.compute_R = false;
+		state.params.assing_VPL_bool = false;
+		state.params.init_vpl_centroids_bool = false;//**No use now
+		state.params.local_slice_compute_distances_bool = false;
+		state.params.select_closest_clusters_bool = false;
+		state.params.compute__Li_modules_bool = false;
+		state.params.select_cheap_cluster_bool = false;
+
+		state.params.COMPUTE_ALL_BOOL = false;
+
+
+
+
+		
 
 		//Create colors for the different cluisters
 		createClusterColors(state);
 		//Generate the random position for the inital centroids
-		create_centroid(state);		
+		create_centroid(state.params);	
+		//Select ini random VPL for centroids
+		create_VPL_init_cluster(state);
+
 
 
 		//
@@ -2077,7 +2467,7 @@ int main(int argc, char* argv[])
 					sutil::displayStats(state_update_time, render_time, display_time);
 					
 					//Imgui menu
-					ImGuiConf();
+					ImGuiConf(state);
 
 					glfwSwapBuffers(window);
 					++state.params.subframe_index;			

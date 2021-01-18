@@ -35,8 +35,14 @@
 #include "Model.h"
 
 
-#define K_MEANS_VPL 100
-#define K_POINTS_CLUSTER 2000
+#define K_POINTS_CLUSTER 2000 //Maximum
+#define K_MEANS_VPL 100 //Maximum
+
+#define L_NEAR_CLUSTERS 10//L near cluster
+
+#define MAX_VPL_CLUSTERS 8
+
+
 
 
 enum RayType
@@ -44,6 +50,7 @@ enum RayType
 	RAY_TYPE_RADIANCE = 0,
 	RAY_TYPE_OCCLUSION = 1,
 	RAY_TYPE_INFO = 2,
+	RAY_TYPE_R = 3,
 	RAY_TYPE_COUNT
 };
 
@@ -96,43 +103,89 @@ struct Params
 	float maxSS; //Max param
 
 
-	//Cluster
+	//Cluster SPACE  --   Select info
+	int N_spatial_cluster;
 	float3* pos;
 	float3* normal;
 
+	//K-means Cluster SPACE  --   assing and recompute
 	int* assing_cluster_vector;
 
 	float3* pos_cent;
 	float3* normal_cent;
 
-	float3 cluster_color[2000];
 
-
+	//Auxiliar Variables-------------------------------
 	int* number_elements_cluster;
 	float3* pos_cent_sum;
 	float3* normal_cent_sum;
+	int position_cluster[K_POINTS_CLUSTER];
+	int pos_clust_x[K_POINTS_CLUSTER];
+	int pos_clust_y[K_POINTS_CLUSTER];
+	//-------------------------------------
+
+	//Select Points per cluster
+	float3* selected_points_pos;
+	float3* selected_points_norm;
+	int* selected_point_index_x;
+	int* selected_point_index_y;
+
+	//R MATRIX
+	bool         compute_R;
+	float3*		 R_matrix;
+	bool show_R_matrix;
+
+	//K_MEANS VPL
+	int N_VPL_cluster;
+
+	int first_VPL_cluster[K_MEANS_VPL];
+	int* first_VPL_cluster_d;
+	int* VPL_assing_cluster;
+
+	VPL* VPL_initial_cent;
+	VPL* VPL_cent;
+
+	//Local slide cluster
+	float* distances_slides;//Matrix KxK showing distance btw all the slides.
+	int* L_closest_clusters;
 
 
+	float* L_i_modules;
+	float* distances_clusters;
 
-	int position_cluster[2000];
-	int pos_clust_x[2000];
-	int pos_clust_y[2000];	
+	int* closest_VPL;
+	int* selected_VPL_pos;
 
 
+	//Other
+	float3 cluster_color[2000];
 
 
 
 	//CLuster BOOLS
 	bool select_points;
+	//Kmeans ptoimizaiton
 	bool k_means_comp;
+	//Soace clustering
 	bool assing_cluster;
 	bool recompute_cluster;
 	bool create_centroids;
 	bool cluster_light_bool;
 	bool init_centroid_points;
+	//VPL clustering
+	bool init_vpl_centroids_bool;
+	bool assing_VPL_bool;
+	//Comute distances
+	bool local_slice_compute_distances_bool;
+	bool select_closest_clusters_bool;
+
+	bool compute__Li_modules_bool;
+	bool select_cheap_cluster_bool;
 
 	bool compute_image;
 	
+	bool COMPUTE_ALL_BOOL;
+
 
 	//Cluster VPL bools
 

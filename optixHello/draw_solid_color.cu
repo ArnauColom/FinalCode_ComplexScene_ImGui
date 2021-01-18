@@ -110,6 +110,7 @@ __device__ __inline__ float3 show_VPL(float3 hit_point) {
 		if (dist < .01)
 		{
 			vpl_pos_color =showvpl.color;// params.cluster_color[params.VPL_assing_cluster[i]];
+			vpl_pos_color = params.cluster_color[params.VPL_assing_cluster[i]];
 			//vpl_pos_color = make_float3(1.);
 			break;
 		}
@@ -162,7 +163,144 @@ float3 direct_light_contribution(float3 hit_point, float3 p_normal, float3 p_Kd,
 }
 
 
+static
+__device__ float3 indirect_no_optimization(float3 hit_point,
+	float3 p_normal) {
 
+	int n_vpls = 0;
+	float3 final_indirect = make_float3(0, 0, 0);
+
+	for (int j = 0; j < params.num_vpl *(params.max_bounces + 1); j++)
+	{
+		VPL vpl = params.vpls[j];//Select VPL			
+		n_vpls++;//Know how vpl influence the scene
+		//Compute the incident direction of the light coming from the current VPL.
+		float3 L = normalize(vpl.pos - hit_point);
+		//Compute its angle with the point
+		float nDl = dot(p_normal, L);
+		//If the angle exits between -90 and 90 degrees the VPL can add its contribution
+		if (nDl >= 0.0f)
+		{
+			float Ldist = length(vpl.pos - hit_point);//Distance between point and VPL
+			float Ldist2 = Ldist * Ldist;// Square of the distane
+			//Apply smooth step to aviod aberrations
+			float distScale = SmoothStep(.0f + params.minSS, 5.f + params.maxSS, Ldist2);
+
+			//float distScale = Ldist2;
+			if (distScale > 0.f)
+			{
+				float visible;
+				OcclusionPRD VPL_prd;
+
+				VPL_prd.attenuation = make_float3(1.0f);
+				//Geometric term
+				float3 L2 = normalize(hit_point - vpl.pos);
+				float nvDl2 = dot(vpl.normal, L2);
+				float G = fabs(nvDl2 * nDl) / Ldist2;// dividod por Ldist2	
+
+				//if (length(vpl.color * G  *distScale) > 0.05) {
+				optixTrace(
+					params.handle,
+					hit_point,
+					L,
+					0.01f * VPL_SHADOW_OFFSET,
+					Ldist - 0.01,
+					0.0f,
+					OptixVisibilityMask(1),
+					OPTIX_RAY_FLAG_NONE,
+					RAY_TYPE_OCCLUSION,
+					RAY_TYPE_COUNT,
+					RAY_TYPE_OCCLUSION,
+					float3_as_args(VPL_prd.attenuation)/*,
+					reinterpret_cast<uint32_t&>(shadow_prd.is_indirect)*/);
+
+				visible = VPL_prd.attenuation.x;
+				//}											
+				final_indirect += vpl.color * G  * visible *distScale;
+				//irradiance = make_float3(1,1,1);
+			}
+		}
+
+	}
+	final_indirect /= static_cast<float>(n_vpls);
+	return final_indirect;
+
+}
+
+static
+__device__ float3 indirect_optimized(float3 hit_point,
+	float3 p_normal) {
+	const uint3    idx = optixGetLaunchIndex();
+	const uint32_t image_index = params.width*idx.y + idx.x;
+	float3 final_indirect = make_float3(0, 0, 0);
+
+	int n_vpls = 1;
+
+	for (int j = 0; j < params.N_VPL_cluster; j++)/* for (int j = 0; j < params.num_vpl*(params.max_bounces + 1); j++)*/
+	{
+		int point_cluster = params.assing_cluster_vector[image_index];
+		int vpl_pos = params.selected_VPL_pos[point_cluster * params.N_VPL_cluster + j];
+		VPL vpl = params.vpls[vpl_pos];//Select VPL   -- 
+		//vpl = params.vpls[j];
+
+		//irradiance = make_float3(1, 1, 1);
+		//if (params.vpls[params.first_VPL_cluster[params.VPL_assing_cluster[vpl_pos]]].hit == true) {
+		if (vpl.hit)
+		{
+			n_vpls++;//Know how vpl influence the scene
+			//Compute the incident direction of the light coming from the current VPL.
+			float3 L = normalize(vpl.pos - hit_point);
+			//Compute its angle with the point
+			float nDl = dot(p_normal, L);
+			//If the angle exits between -90 and 90 degrees the VPL can add its contribution
+			if (nDl >= 0.0f)
+			{
+				float Ldist = length(vpl.pos - hit_point);//Distance between point and VPL
+				float Ldist2 = Ldist * Ldist;// Square of the distane
+				//Apply smooth step to aviod aberrations
+				float distScale = SmoothStep(.0f + params.minSS, 20.f + params.maxSS, Ldist2);
+
+				//float distScale = Ldist2;
+				if (distScale > 0.f)
+				{
+					float visible;
+					OcclusionPRD VPL_prd;
+
+					VPL_prd.attenuation = make_float3(1.0f);
+					//Geometric term
+					float3 L2 = normalize(hit_point - vpl.pos);
+					float nvDl2 = dot(vpl.normal, L2);
+					float G = fabs(nvDl2 * nDl) / Ldist2;// dividod por Ldist2	
+
+					//if (length(vpl.color * G  *distScale) > 0.05) {
+					optixTrace(
+						params.handle,
+						hit_point,
+						L,
+						0.01f * VPL_SHADOW_OFFSET,
+						Ldist - 0.01,
+						0.0f,
+						OptixVisibilityMask(1),
+						OPTIX_RAY_FLAG_NONE,
+						RAY_TYPE_OCCLUSION,
+						RAY_TYPE_COUNT,
+						RAY_TYPE_OCCLUSION,
+						float3_as_args(VPL_prd.attenuation)/*,
+						reinterpret_cast<uint32_t&>(shadow_prd.is_indirect)*/);
+
+					visible = VPL_prd.attenuation.x;
+					//}											
+					final_indirect += vpl.color * G  * visible*distScale *10;//multiplied by a factor 
+					//final_indirect = make_float3(1,1,1);
+				}
+			}
+		}
+		
+
+	}
+	final_indirect /= static_cast<float>(n_vpls);
+	return final_indirect;
+}
 
 
 extern "C" __global__ void __closesthit__diffuse_radiance()
@@ -264,59 +402,11 @@ extern "C" __global__ void __closesthit__diffuse_radiance()
 	int n_vpls = 0;
 	if (params.s_i)
 	{
-		for (int j = 0; j < params.num_vpl *(params.max_bounces + 1); j++)
-		{
-			VPL vpl = params.vpls[j];//Select VPL			
-			n_vpls++;//Know how vpl influence the scene
-			//Compute the incident direction of the light coming from the current VPL.
-			float3 L = normalize(vpl.pos - hit_point);
-			//Compute its angle with the point
-			float nDl = dot(p_normal, L);
-			//If the angle exits between -90 and 90 degrees the VPL can add its contribution
-			if (nDl >= 0.0f)
-			{
-				float Ldist = length(vpl.pos - hit_point);//Distance between point and VPL
-				float Ldist2 = Ldist * Ldist;// Square of the distane
-				//Apply smooth step to aviod aberrations
-				float distScale = SmoothStep(.0f + params.minSS, 5.f + params.maxSS , Ldist2);
-
-				//float distScale = Ldist2;
-				if (distScale > 0.f)
-				{
-					float visible;
-					OcclusionPRD VPL_prd;
-
-					VPL_prd.attenuation = make_float3(1.0f);
-					//Geometric term
-					float3 L2 = normalize(hit_point - vpl.pos);
-					float nvDl2 = dot(vpl.normal, L2);
-					float G = fabs(nvDl2 * nDl) / Ldist2;// dividod por Ldist2	
-
-					//if (length(vpl.color * G  *distScale) > 0.05) {
-					optixTrace(
-						params.handle,
-						hit_point,
-						L,
-						0.01f * VPL_SHADOW_OFFSET,
-						Ldist - 0.01,
-						0.0f,
-						OptixVisibilityMask(1),
-						OPTIX_RAY_FLAG_NONE,
-						RAY_TYPE_OCCLUSION,
-						RAY_TYPE_COUNT,
-						RAY_TYPE_OCCLUSION,
-						float3_as_args(VPL_prd.attenuation)/*,
-						reinterpret_cast<uint32_t&>(shadow_prd.is_indirect)*/);
-
-					visible = VPL_prd.attenuation.x;
-					//}											
-					final_indirect += vpl.color * G  * visible *distScale;
-					//irradiance = make_float3(1,1,1);
-				}
-			}
-
-		}
-		final_indirect /= static_cast<float>(n_vpls);
+		if (!params.COMPUTE_ALL_BOOL)
+			final_indirect = indirect_no_optimization(hit_point, p_normal);		
+	}
+	if (params.COMPUTE_ALL_BOOL) {
+		final_indirect = indirect_optimized(hit_point, p_normal);
 	}
 
 
@@ -398,6 +488,108 @@ extern "C" __global__ void __closesthit__select_info()
 
 	params.normal[image_index] = make_float3(p_normal.x, p_normal.y, p_normal.z);
 	params.pos[image_index] = make_float3(hit_point.x, hit_point.y, hit_point.z);
+}
+
+
+extern "C" __global__ void __closesthit__compute_R_matrix() {
+
+
+	const uint3    idx = optixGetLaunchIndex();
+	int index_R = idx.x;
+	const float3 ray_orig = optixGetWorldRayOrigin();
+	const float3 ray_dir = optixGetWorldRayDirection();
+	const float  ray_t = optixGetRayTmax();
+
+	float3 hit_point = ray_orig + ray_t * ray_dir;
+	float3 irradiance = make_float3(0.f);
+	int  n_vpls = 0;
+
+
+	const HitGroupData &sbtData
+		= *(const HitGroupData*)optixGetSbtDataPointer();
+
+	// ------------------------------------------------------------------
+	// gather some basic hit information
+	// ------------------------------------------------------------------
+	const int   primID = optixGetPrimitiveIndex();
+	const vec3i index = sbtData.indices[primID];
+	const float u = optixGetTriangleBarycentrics().x;
+	const float v = optixGetTriangleBarycentrics().y;
+
+	// ------------------------------------------------------------------
+	// compute normal, using either shading normal (if avail), or
+	// geometry normal (fallback)
+	// ------------------------------------------------------------------
+	const float3 &A = sbtData.vertices[index.x];
+	const float3 &B = sbtData.vertices[index.y];
+	const float3 &C = sbtData.vertices[index.z];
+	float3 Ng = cross(B - A, C - A);
+	float3 Ns = Ng;
+
+	// ------------------------------------------------------------------
+	// face-forward and normalize normals
+	// ------------------------------------------------------------------
+	const float3 rayDir = optixGetWorldRayDirection();
+
+	if (dot(rayDir, Ng) > 0.f) Ng = -Ng;
+	Ng = normalize(Ng);
+
+	if (dot(Ng, Ns) < 0.f)
+		Ns -= 2.f*dot(Ng, Ns)*Ng;
+	Ns = normalize(Ns);
+
+
+	float3 p_normal = Ns;
+	float3 p_Kd = sbtData.diffuse_color;
+	int total_VPL = params.num_vpl *(params.max_bounces + 1);
+	for (int j = 0; j < total_VPL; j++)
+	{
+		VPL vpl = params.vpls[j];//Select VPL
+		int total_VPL = params.num_vpl *(params.max_bounces + 1);
+		//irradiance = make_float3(1, 1, 1);
+		params.R_matrix[index_R*total_VPL + j] = make_float3(0.);
+		n_vpls++;//Know how vpl influence the scene
+		//Compute the incident direction of the light coming from the current VPL.
+		float3 L = normalize(vpl.pos - hit_point);
+		//Compute its angle with the point
+		float nDl = dot(p_normal, L);
+		//If the angle exits between -90 and 90 degrees the VPL can add its contribution
+
+		float Ldist = length(vpl.pos - hit_point);//Distance between point and VPL
+		float Ldist2 = Ldist * Ldist;// Square of the distane
+		//Apply smooth step to aviod aberrations
+		float distScale = SmoothStep(.0f + params.minSS, 20.f + params.maxSS, Ldist2);
+
+		//float distScale = Ldist2;		
+		float visible;
+		OcclusionPRD VPL_prd;
+
+		VPL_prd.attenuation = make_float3(1.0f);
+		//Geometric term
+		float3 L2 = normalize(hit_point - vpl.pos);
+		float nvDl2 = dot(vpl.normal, L2);
+		float G = fabs(nvDl2 * nDl) / Ldist2;// dividod por Ldist2	
+
+		optixTrace(
+			params.handle,
+			hit_point,
+			L,
+			0.01f * VPL_SHADOW_OFFSET,
+			Ldist - 0.01,
+			0.0f,
+			OptixVisibilityMask(1),
+			OPTIX_RAY_FLAG_NONE,
+			RAY_TYPE_OCCLUSION,
+			RAY_TYPE_COUNT,
+			RAY_TYPE_OCCLUSION,
+			float3_as_args(VPL_prd.attenuation)
+		);
+
+		visible = VPL_prd.attenuation.x;
+
+		params.R_matrix[index_R*total_VPL + j] = vpl.color * p_Kd * dot(p_normal, L) * dot(vpl.normal, -L) * visible;
+	}
+
 }
 
 
